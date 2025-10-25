@@ -3,7 +3,7 @@ pipeline {
     
     environment {
         GIT_REPO = "https://github.com/shivarajmanvi/Jenkinsandjava.git"
-        AWS_REGION = 'us-west-1'
+        AWS_REGION = 'ap-south-1'
         AWS_ACCESS_KEY_ID = "AKIAQEU2YTEKMVC2SEH3"
         AWS_SECRET_ACCESS_KEY = "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"
         ECR_REPO_NAME = 'jenkinsecr1'
