@@ -1,146 +1,96 @@
 pipeline {
-    agent any
-
+    agent any 
+    
     environment {
-        // 🔹 GitHub repository
-        GIT_REPO = 'https://github.com/shivarajmanvi/Jenkinsandjava.git'
-        BRANCH_NAME = 'main' // change to 'master' if your repo uses that
-
-        // 🔹 AWS & ECR configuration
-        AWS_REGION = 'ap-south-1'
-        ECR_PUBLIC_REPO_URI = 'public.ecr.aws/s9l8a0f0/jenkinsecr'
+        GIT_REPO = "https://github.com/shivarajmanvi/Jenkinsandjava.git"
+        AWS_REGION = 'us-west-1'
+        AWS_ACCESS_KEY_ID = "AKIAQEU2YTEKMVC2SEH3"
+        AWS_SECRET_ACCESS_KEY = "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"
+        ECR_REPO_NAME = 'jenkinsecr1'
+        ECR_PRIVATE_REPO_URI = '009988249876.dkr.ecr.ap-south-1.amazonaws.com/jenkinsecr1'
         IMAGE_TAG = 'latest'
-        IMAGE_URI = "${ECR_PUBLIC_REPO_URI}:${IMAGE_TAG}"
-
-        // 🔹 EKS configuration
-        EKS_CLUSTER_NAME = 'my-eks-cluster'
-        K8S_DEPLOYMENT_NAME = 'jenkins-java-app'
-        K8S_NAMESPACE = 'default'
+        AWS_ACCOUNT_ID = '009988249876'
+        IMAGE_URI = "${ECR_PRIVATE_REPO_URI}:${IMAGE_TAG}"
     }
-
     stages {
-
-        stage('Install AWS CLI and kubectl') {
+        stage ('Install AWS CLI') {
             steps {
-                sh '''
+                script {
+                    sh '''
                     set -e
-                    echo "Installing AWS CLI and kubectl..."
-                    sudo apt update -y
-                    sudo apt install -y unzip curl apt-transport-https gnupg
-
-                    # Install AWS CLI v2
+                    echo "Installing AWS CLI..."
                     curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
                     rm -rf aws
-                    unzip -q awscliv2.zip
-                    sudo ./aws/install --update
+                    unzip -oq awscliv2.zip
+                    ./aws/install -i ~/aws-cli -b ~/bin --update
+                    export PATH=~/bin:$PATH
                     aws --version
-
-                    # Install kubectl
-                    curl -o kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/1.28.4/2023-11-14/bin/linux/amd64/kubectl
-                    chmod +x ./kubectl
-                    sudo mv ./kubectl /usr/local/bin/
-                    kubectl version --client
                 '''
-            }
-        }
-
-        stage('Configure AWS Credentials') {
-            steps {
-                // 🔒 Uses credentials stored securely in Jenkins
-                withCredentials([aws(credentialsId: 'aws-jenkins-creds', region: "${AWS_REGION}")]) {
-                    sh '''
-                        echo "AWS credentials configured from Jenkins Credentials Store..."
-                        aws sts get-caller-identity
-                    '''
                 }
             }
         }
-
+        stage('configure AWS Credentials') {
+            steps {
+                script {
+                    sh '''
+                    echo "setting up aws credentials for jenkins..."
+                    mkdir -p /var/lib/jenkins/.aws
+                    echo "[default]" > /var/lib/jenkins/.aws/credentials
+                    aws_access_key_id=${AWS_ACCESS_KEY_ID}
+                    aws_secret_access_key=${AWS_SECRET_ACCESS_KEY}
+                    chown -R jenkins:jenkins /var/lib/jenkins/.aws
+                '''
+                }
+            }
+        }
         stage('Clone Repository') {
             steps {
-                echo "Cloning source code from GitHub..."
-                git url: "${GIT_REPO}", branch: "${BRANCH_NAME}"
+                git url: "${GIT_REPO}", branch: 'main'
             }
         }
-
-        stage('Build Java Application') {
+        stage('Build') {
             steps {
-                sh '''
-                    echo "Building and packaging Java application..."
-                    mvn clean package -DskipTests
-                '''
-            }
-        }
-
-        stage('Archive Build Artifact') {
-            steps {
-                echo "Archiving JAR file for reference..."
-                archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
+                script {
+                    sh '''
+                        echo "Building Java application..."
+                        mvn clean -B -Denforcer.skip=true package
+                    '''
+                }
             }
         }
 
         stage('Login to AWS ECR') {
             steps {
-                sh '''
-                    echo "Logging in to AWS ECR Public..."
-                    aws ecr-public get-login-password --region us-east-1 | \
-                    docker login --username AWS --password-stdin public.ecr.aws
-                '''
+                script {
+                    sh '''
+                        echo "Logging into AWS ECR..."
+                        export PATH=~/bin:$PATH
+                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_PRIVATE_REPO_URI}
+                    '''
+                }   
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                sh '''
-                    echo "Building Docker image..."
-                    docker build -t ${IMAGE_URI} .
-                '''
+                script {
+                    sh '''
+                        echo "Building Docker image..."
+                        docker build -t ${IMAGE_URI} .
+                    '''
+                }
             }
         }
 
         stage('Push Docker Image to ECR') {
             steps {
-                sh '''
-                    echo "Pushing Docker image to ECR Public..."
-                    docker push ${IMAGE_URI}
-                '''
-            }
-        }
-
-        stage('Deploy to Amazon EKS') {
-            steps {
-                withCredentials([aws(credentialsId: 'aws-jenkins-creds', region: "${AWS_REGION}")]) {
+                script {
                     sh '''
-                        echo "Configuring kubectl to connect to EKS cluster..."
-                        aws eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER_NAME}
-
-                        echo "Updating Kubernetes deployment with new Docker image..."
-                        kubectl set image deployment/${K8S_DEPLOYMENT_NAME} \
-                            ${K8S_DEPLOYMENT_NAME}=${IMAGE_URI} \
-                            -n ${K8S_NAMESPACE} || \
-                        echo "Deployment not found. Creating new deployment..."
-
-                        # If deployment doesn’t exist, create one
-                        kubectl get deployment ${K8S_DEPLOYMENT_NAME} -n ${K8S_NAMESPACE} || kubectl create deployment ${K8S_DEPLOYMENT_NAME} --image=${IMAGE_URI} -n ${K8S_NAMESPACE}
-
-                        echo "Exposing service on port 8080..."
-                        kubectl expose deployment ${K8S_DEPLOYMENT_NAME} --type=LoadBalancer --port=8080 -n ${K8S_NAMESPACE} || true
-
-                        echo "✅ Application deployed successfully to EKS!"
-                        kubectl get svc -n ${K8S_NAMESPACE}
+                        echo "Pushing Docker image to ECR..."
+                        docker push ${IMAGE_URI}
                     '''
                 }
             }
         }
     }
-
-    post {
-        success {
-            echo "✅ Build, push, and deployment completed successfully!"
-        }
-        failure {
-            echo "❌ Pipeline failed. Please check the logs."
-        }
-    }
 }
-
